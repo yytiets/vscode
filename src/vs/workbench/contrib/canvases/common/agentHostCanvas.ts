@@ -5,15 +5,16 @@
 
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { Schemas } from '../../../../base/common/network.js';
-import { derived, IObservable, mapObservableArrayCached } from '../../../../base/common/observable.js';
+import { derived, derivedOpts, IObservable, mapObservableArrayCached } from '../../../../base/common/observable.js';
 import { URI } from '../../../../base/common/uri.js';
 import { localize } from '../../../../nls.js';
 import { IAgentConnection } from '../../../../platform/agentHost/common/agentService.js';
+import { getInlineToolInput, parsePartialToolInput } from '../../../../platform/agentHost/common/partialToolInput.js';
 import { observableFromSubscription } from '../../../../platform/agentHost/common/state/agentSubscription.js';
 import { CanvasReference, CanvasState } from '../../../../platform/agentHost/common/state/protocol/channels-canvas/state.js';
-import { StateComponents } from '../../../../platform/agentHost/common/state/sessionState.js';
+import { ChatState, ResponsePartKind, StateComponents, ToolCallStatus } from '../../../../platform/agentHost/common/state/sessionState.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
-import { ICanvas, ICanvasContext, ICanvasOwner } from './canvas.js';
+import { ICanvas, ICanvasContext, ICanvasOpenRequest, ICanvasOwner } from './canvas.js';
 
 export class AgentHostCanvas implements ICanvas {
 	readonly resource: URI;
@@ -56,7 +57,7 @@ export class AgentHostCanvasCollection extends Disposable {
 		super();
 	}
 
-	createContext(owner: ICanvasOwner, references: IObservable<readonly CanvasReference[] | undefined>): ICanvasContext {
+	createContext(owner: ICanvasOwner, references: IObservable<readonly CanvasReference[] | undefined>, chat?: IObservable<ChatState | undefined>): ICanvasContext {
 		const states = mapObservableArrayCached(this, references.map(value => value ?? []), canvas => {
 			const resource = URI.parse(canvas.resource, true);
 			const subscription = derived(this, reader => {
@@ -69,9 +70,39 @@ export class AgentHostCanvasCollection extends Disposable {
 				return new AgentHostCanvas(resource, state && !(state instanceof Error) ? state : undefined, this.logService);
 			});
 		}, canvas => canvas.resource);
-		return {
-			owner,
-			canvases: derived(this, reader => references.read(reader) === undefined ? undefined : states.read(reader).map(state => state.read(reader))),
-		};
+		const canvases = derived(this, reader => references.read(reader) === undefined ? undefined : states.read(reader).map(state => state.read(reader)));
+		const openRequests = chat ? derivedOpts<ReadonlyMap<string, ICanvasOpenRequest>>({
+			owner: this,
+			equalsFn: (first, second) => first.size === second.size && [...first].every(([key, value]) => value.id === second.get(key)?.id && value.succeeded === second.get(key)?.succeeded),
+		}, reader => getOpenRequests(chat.read(reader), canvases.read(reader))) : undefined;
+		return { owner, canvases, openRequests };
 	}
+}
+
+function getOpenRequests(chat: ChatState | undefined, canvases: readonly ICanvas[] | undefined): ReadonlyMap<string, ICanvasOpenRequest> {
+	const requests = new Map<string, ICanvasOpenRequest>();
+	const instances = new Set(canvases?.flatMap(canvas => canvas.instanceId ? [canvas.instanceId] : []) ?? []);
+	if (!chat || instances.size === 0) {
+		return requests;
+	}
+	const turns = chat.activeTurn ? [...chat.turns, chat.activeTurn] : chat.turns;
+	for (let turnIndex = turns.length - 1; turnIndex >= 0 && requests.size < instances.size; turnIndex--) {
+		const turn = turns[turnIndex];
+		for (let partIndex = turn.responseParts.length - 1; partIndex >= 0; partIndex--) {
+			const part = turn.responseParts[partIndex];
+			if (part.kind !== ResponsePartKind.ToolCall || part.toolCall.toolName !== 'open_canvas') {
+				continue;
+			}
+			const call = part.toolCall;
+			if (call.status !== ToolCallStatus.Running && call.status !== ToolCallStatus.Completed && call.status !== ToolCallStatus.Cancelled) {
+				continue;
+			}
+			const input = getInlineToolInput(call.toolInput);
+			const instanceId = input ? parsePartialToolInput(input)?.instanceId : undefined;
+			if (typeof instanceId === 'string' && instances.has(instanceId) && !requests.has(instanceId)) {
+				requests.set(instanceId, { id: `${turn.id}\u0000${call.toolCallId}`, succeeded: call.status === ToolCallStatus.Completed && call.success });
+			}
+		}
+	}
+	return requests;
 }

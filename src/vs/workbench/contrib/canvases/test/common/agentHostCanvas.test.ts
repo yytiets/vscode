@@ -8,12 +8,12 @@ import { Emitter, Event } from '../../../../../base/common/event.js';
 import { IReference } from '../../../../../base/common/lifecycle.js';
 import { autorun, constObservable, observableValue } from '../../../../../base/common/observable.js';
 import { URI } from '../../../../../base/common/uri.js';
-import { mock } from '../../../../../base/test/common/mock.js';
+import { mock, upcastPartial } from '../../../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { IAgentConnection } from '../../../../../platform/agentHost/common/agentService.js';
 import { IAgentSubscription } from '../../../../../platform/agentHost/common/state/agentSubscription.js';
 import { CanvasReference, CanvasState } from '../../../../../platform/agentHost/common/state/protocol/channels-canvas/state.js';
-import { ComponentToState, StateComponents } from '../../../../../platform/agentHost/common/state/sessionState.js';
+import { ChatState, ComponentToState, ResponsePartKind, StateComponents, ToolCallCompletedState, ToolCallConfirmationReason, ToolCallStatus, Turn } from '../../../../../platform/agentHost/common/state/sessionState.js';
 import { NullLogService } from '../../../../../platform/log/common/log.js';
 import { AgentHostCanvas, AgentHostCanvasCollection } from '../../common/agentHostCanvas.js';
 import { ICanvas, ICanvasOwner } from '../../common/canvas.js';
@@ -72,6 +72,38 @@ suite('AgentHost canvases', () => {
 		const canvas = new AgentHostCanvas(resource, undefined, new NullLogService());
 		assert.deepStrictEqual({ resource: canvas.resource.toString(), instanceId: canvas.instanceId, source: canvas.source }, {
 			resource: resource.toString(), instanceId: undefined, source: undefined,
+		});
+	});
+
+	test('tracks explicit opens by tool identity, including failed requests, rather than source changes', () => {
+		const connection = new class extends mock<IAgentConnection>() {
+			override readonly initializeResult = constObservable(undefined);
+			override getSubscription<T extends StateComponents>(): IReference<IAgentSubscription<ComponentToState[T]>> {
+				return {
+					object: {
+						value: state as ComponentToState[T], verifiedValue: state as ComponentToState[T],
+						onDidChange: Event.None, onWillApplyAction: Event.None, onDidApplyAction: Event.None,
+					},
+					dispose: () => { },
+				};
+			}
+		}();
+		const call: ToolCallCompletedState = {
+			toolCallId: 'first', toolName: 'open_canvas', displayName: 'Open Canvas',
+			invocationMessage: 'Opening canvas', pastTenseMessage: 'Opened canvas',
+			status: ToolCallStatus.Completed, success: true, confirmed: ToolCallConfirmationReason.NotNeeded, toolInput: '{"instanceId":"preview"}',
+		};
+		const first = upcastPartial<Turn>({ id: 'turn', responseParts: [{ kind: ResponsePartKind.ToolCall, toolCall: call }] });
+		const chat = observableValue<ChatState | undefined>('chat', upcastPartial<ChatState>({ resource: owner.chat.toString(), turns: [first] }));
+		const collection = store.add(new AgentHostCanvasCollection(owner.providerId, connection, new NullLogService()));
+		const context = collection.createContext(owner, constObservable([{ resource: resource.toString() }]), chat);
+		const initial = context.openRequests?.get().get('preview');
+		const failed = upcastPartial<Turn>({
+			id: 'next', responseParts: [{ kind: ResponsePartKind.ToolCall, toolCall: { ...call, toolCallId: 'failed', success: false } }],
+		});
+		chat.set(upcastPartial<ChatState>({ resource: owner.chat.toString(), turns: [first, failed] }), undefined);
+		assert.deepStrictEqual({ initial, latest: context.openRequests?.get().get('preview') }, {
+			initial: { id: 'turn\u0000first', succeeded: true }, latest: { id: 'next\u0000failed', succeeded: false },
 		});
 	});
 

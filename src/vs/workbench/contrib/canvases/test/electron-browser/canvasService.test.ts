@@ -20,7 +20,8 @@ import { IEditorIdentifier, ITextDiffEditorPane } from '../../../../common/edito
 import { IChatEntitlementService } from '../../../../services/chat/common/chatEntitlementService.js';
 import { IEditorGroup, IEditorGroupsService, IEditorPart } from '../../../../services/editor/common/editorGroupsService.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
-import { CanvasInput, canvasOwnerKey, ICanvas, ICanvasContext, ICanvasContextService, ICanvasOwner } from '../../common/canvas.js';
+import { CanvasInput, canvasOwnerKey, ICanvas, ICanvasContext, ICanvasContextService, ICanvasOpenRequest, ICanvasOwner } from '../../common/canvas.js';
+import { EditorInput } from '../../../../common/editor/editorInput.js';
 import { CanvasService } from '../../electron-browser/canvasService.js';
 
 suite('CanvasService', () => {
@@ -32,7 +33,8 @@ suite('CanvasService', () => {
 			resource: URI.parse('canvas:/preview'), instanceId: 'preview', title: 'Preview', source: URI.parse('https://example.test'),
 		};
 		const canvases = observableValue<readonly ICanvas[] | undefined>('canvases', []);
-		const contexts = observableValue<readonly ICanvasContext[]>('contexts', [{ owner, canvases }]);
+		const openRequests = observableValue<ReadonlyMap<string, ICanvasOpenRequest>>('openRequests', new Map());
+		const contexts = observableValue<readonly ICanvasContext[]>('contexts', [{ owner, canvases, openRequests }]);
 		const visible = observableValue<ReadonlySet<string>>('visible', new Set([canvasOwnerKey(owner)]));
 		const removed = store.add(new Emitter<ICanvasOwner>());
 		const contextService = upcastPartial<ICanvasContextService>({
@@ -72,6 +74,9 @@ suite('CanvasService', () => {
 			override findEditors(): readonly IEditorIdentifier[] {
 				return openEditors.slice();
 			}
+			override isVisible(input: EditorInput): boolean {
+				return openEditors.some(editor => editor.editor === input && !input.isDisposed());
+			}
 			override async closeEditors(editors: readonly IEditorIdentifier[]): Promise<void> {
 				for (const editor of editors) {
 					if (editor.editor instanceof CanvasInput) {
@@ -94,7 +99,7 @@ suite('CanvasService', () => {
 		const service = store.add(new CanvasService(contextService, editorService, instantiationService, entitlementService,
 			new TestConfigurationService({ [CanvasesEnabledSettingId]: true }), new NullLogService(), notificationService));
 		return {
-			owner, canvas, canvases, contexts, visible, removed, opened, closed, notifications, service,
+			owner, canvas, canvases, contexts, openRequests, visible, removed, opened, closed, notifications, service,
 			delayOpen: () => pendingOpen = new DeferredPromise<void>(),
 			failOpen: (value: boolean) => failOpen = value,
 			hideAI: () => { hidden = true; sentiment.fire(); },
@@ -111,6 +116,43 @@ suite('CanvasService', () => {
 		const afterDismissal = harness.opened.length;
 		harness.canvases.set([{ ...harness.canvas, resource: URI.parse('canvas:/new-lifetime') }], undefined);
 		assert.deepStrictEqual({ afterDismissal, channels: harness.opened.map(input => input.reference.canvas.toString()) }, { afterDismissal: 1, channels: ['canvas:/preview', 'canvas:/new-lifetime'] });
+	});
+
+	test('reopens a dismissed lifetime only for a new successful model open request', async () => {
+		const harness = createHarness();
+		harness.openRequests.set(new Map([['preview', { id: 'first', succeeded: true }]]), undefined);
+		harness.canvases.set([harness.canvas], undefined);
+		await timeout(0);
+		harness.opened[0].dispose();
+		harness.canvases.set([{ ...harness.canvas, title: 'Updated', source: URI.parse('https://example.test/replacement') }], undefined);
+		const afterMetadata = harness.opened.length;
+		harness.openRequests.set(new Map([['preview', { id: 'second', succeeded: false }]]), undefined);
+		const beforeSuccess = harness.opened.length;
+		harness.openRequests.set(new Map([['preview', { id: 'second', succeeded: true }]]), undefined);
+		await timeout(0);
+		assert.deepStrictEqual({
+			afterMetadata, beforeSuccess, afterSuccess: harness.opened.length, sameLifetime: harness.opened[0].matches(harness.opened[1]),
+		}, { afterMetadata: 1, beforeSuccess: 1, afterSuccess: 2, sameLifetime: true });
+	});
+
+	test('does not undo a user close after the corresponding model open started', async () => {
+		const harness = createHarness();
+		harness.openRequests.set(new Map([['preview', { id: 'opening', succeeded: false }]]), undefined);
+		harness.canvases.set([harness.canvas], undefined);
+		await timeout(0);
+		harness.opened[0].dispose();
+		harness.openRequests.set(new Map([['preview', { id: 'opening', succeeded: true }]]), undefined);
+		assert.strictEqual(harness.opened.length, 1);
+	});
+
+	test('acknowledges successful opens of a visible canvas without repeatedly revealing it', async () => {
+		const harness = createHarness();
+		harness.openRequests.set(new Map([['preview', { id: 'first', succeeded: false }]]), undefined);
+		harness.canvases.set([harness.canvas], undefined);
+		await timeout(0);
+		harness.openRequests.set(new Map([['preview', { id: 'first', succeeded: true }]]), undefined);
+		harness.openRequests.set(new Map([['preview', { id: 'second', succeeded: true }]]), undefined);
+		assert.strictEqual(harness.opened.length, 1);
 	});
 
 	test('keeps hidden owners out of presentation and isolates identical instances in different chats', async () => {
@@ -137,7 +179,7 @@ suite('CanvasService', () => {
 		assert.deepStrictEqual({ disposed: harness.opened[0].isDisposed(), closed: harness.closed.length }, { disposed: true, closed: 1 });
 	});
 
-	test('surfaces failed opens without permanently marking the lifetime presented', async () => {
+	test('surfaces failed opens and permits manual retry without repeatedly revealing the lifetime', async () => {
 		const harness = createHarness();
 		harness.failOpen(true);
 		harness.canvases.set([harness.canvas], undefined);
@@ -145,6 +187,7 @@ suite('CanvasService', () => {
 		harness.failOpen(false);
 		harness.visible.set(new Set(), undefined);
 		harness.visible.set(new Set([canvasOwnerKey(harness.owner)]), undefined);
+		await harness.service.reopenCanvas(harness.opened[0].reference);
 		await timeout(0);
 		assert.deepStrictEqual({ attempted: harness.opened.length, notifications: harness.notifications.length, sameInput: harness.opened[0] === harness.opened[1] }, { attempted: 2, notifications: 1, sameInput: true });
 	});

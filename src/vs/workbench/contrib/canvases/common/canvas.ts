@@ -41,6 +41,12 @@ export interface ICanvasReopenTarget {
 export interface ICanvasContext {
 	readonly owner: ICanvasOwner;
 	readonly canvases: IObservable<readonly ICanvas[] | undefined>;
+	readonly openRequests?: IObservable<ReadonlyMap<string, ICanvasOpenRequest>>;
+}
+
+export interface ICanvasOpenRequest {
+	readonly id: string;
+	readonly succeeded: boolean;
 }
 
 export const ICanvasContextService = createDecorator<ICanvasContextService>('canvasContextService');

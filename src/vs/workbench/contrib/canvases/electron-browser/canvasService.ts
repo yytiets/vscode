@@ -25,8 +25,9 @@ export class CanvasService extends Disposable implements ICanvasService {
 
 	private readonly inputs = this._register(new DisposableMap<string, CanvasInput>());
 	private readonly inputLifetimes = this._register(new DisposableMap<string, DisposableStore>());
-	private readonly dismissed = new Map<string, ICanvasReference>();
-	private readonly presented = new Set<string>();
+	private readonly dismissed = new Map<string, { readonly reference: ICanvasReference; readonly requestId: string | undefined }>();
+	private readonly presented = new Map<string, string | undefined>();
+	private readonly requests = new Map<string, string | undefined>();
 	private readonly pendingOpens = new Set<CanvasInput>();
 	private readonly programmaticCloses = new Set<CanvasInput>();
 	private readonly dismissedChanged = observableSignal(this);
@@ -51,7 +52,7 @@ export class CanvasService extends Disposable implements ICanvasService {
 				return [];
 			}
 			const targets: ICanvasReopenTarget[] = [];
-			for (const reference of this.dismissed.values()) {
+			for (const { reference } of this.dismissed.values()) {
 				if (!contextService.isOwnerVisible(reference, reader)) {
 					continue;
 				}
@@ -76,13 +77,27 @@ export class CanvasService extends Disposable implements ICanvasService {
 				}
 				knownOwners.add(canvasOwnerKey(context.owner));
 				const visible = enabled && contextService.isOwnerVisible(context.owner, reader);
+				const requests = context.openRequests?.read(reader);
 				for (const canvas of canvases) {
 					const reference: ICanvasReference = { ...context.owner, canvas: canvas.resource };
 					const key = getCanvasReferenceKey(reference);
 					liveKeys.add(key);
 					let input = this.inputs.get(key);
 					input?.setCanvas(canvas);
-					if (!visible || canvas.source === undefined || this.dismissed.has(key) || this.presented.has(key)) {
+					const request = canvas.instanceId ? requests?.get(canvas.instanceId) : undefined;
+					if (request || !this.requests.has(key)) {
+						this.requests.set(key, request?.id);
+					}
+					const requestId = this.requests.get(key);
+					const dismissed = this.dismissed.get(key);
+					if (!visible || canvas.source === undefined
+						|| (dismissed && (dismissed.requestId === requestId || !request?.succeeded))
+						|| (this.presented.has(key) && (this.presented.get(key) === requestId || !request?.succeeded))) {
+						continue;
+					}
+					this.deleteDismissed(key);
+					if (input && request?.succeeded && this.editorService.isVisible(input)) {
+						this.presented.set(key, requestId);
 						continue;
 					}
 					input ??= this.getOrCreateInput(reference, canvas);
@@ -90,8 +105,14 @@ export class CanvasService extends Disposable implements ICanvasService {
 				}
 			}
 			for (const [key, dismissed] of this.dismissed) {
-				if (!enabled || (knownOwners.has(canvasOwnerKey(dismissed)) && !liveKeys.has(key))) {
+				if (!enabled || (knownOwners.has(canvasOwnerKey(dismissed.reference)) && !liveKeys.has(key))) {
 					this.deleteDismissed(key);
+					this.requests.delete(key);
+				}
+			}
+			for (const key of this.requests.keys()) {
+				if (!liveKeys.has(key) && !this.inputs.has(key) && !this.dismissed.has(key)) {
+					this.requests.delete(key);
 				}
 			}
 			for (const [key, input] of this.inputs) {
@@ -178,7 +199,7 @@ export class CanvasService extends Disposable implements ICanvasService {
 			if (!pane) {
 				throw new Error(localize('canvas.openFailed', "The canvas editor could not be opened."));
 			}
-			this.presented.add(key);
+			this.presented.set(key, this.requests.get(key));
 		} catch (error) {
 			this.presented.delete(key);
 			if (this.enabled.get() && this.inputs.get(key) === input && !input.isDisposed()) {
@@ -195,8 +216,9 @@ export class CanvasService extends Disposable implements ICanvasService {
 
 	private removeOwner(owner: ICanvasOwner): void {
 		for (const [key, dismissed] of this.dismissed) {
-			if (isCanvasOwner(dismissed, owner)) {
+			if (isCanvasOwner(dismissed.reference, owner)) {
 				this.deleteDismissed(key);
+				this.requests.delete(key);
 			}
 		}
 		for (const [key, input] of this.inputs) {
@@ -217,6 +239,7 @@ export class CanvasService extends Disposable implements ICanvasService {
 		const lifetime = this.inputLifetimes.deleteAndLeak(key);
 		this.deleteDismissed(key);
 		this.presented.delete(key);
+		this.requests.delete(key);
 		void this.closeEditors(input).catch(error => this.reportError('Failed to close canvas', error)).finally(() => {
 			input.dispose();
 			lifetime?.dispose();
@@ -235,7 +258,7 @@ export class CanvasService extends Disposable implements ICanvasService {
 
 	private rememberDismissed(key: string, reference: ICanvasReference): void {
 		this.dismissed.delete(key);
-		this.dismissed.set(key, reference);
+		this.dismissed.set(key, { reference, requestId: this.requests.get(key) });
 		this.dismissedChanged.trigger(undefined);
 	}
 

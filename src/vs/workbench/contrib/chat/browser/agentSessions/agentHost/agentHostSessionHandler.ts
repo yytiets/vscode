@@ -815,9 +815,10 @@ class AgentHostChatSession extends Disposable implements IChatSession {
 		});
 		this.setStateSubscriptions(sessionSubscription, chatSubscription);
 		if (canvasProvider) {
+			const presentationChat = derived(this, reader => this._canvasDisposed.read(reader) ? undefined : this._chatState.read(reader).read(reader));
 			const references = derived<readonly CanvasReference[] | undefined>(this, reader => {
-				const chat = this._chatState.read(reader).read(reader);
-				return this._canvasDisposed.read(reader) || !chat ? undefined : chat.canvases ?? [];
+				const chat = presentationChat.read(reader);
+				return chat?.canvases ?? (chat ? [] : undefined);
 			});
 			const owner = derivedOpts<ICanvasOwner | undefined>({ owner: this, equalsFn: (first, second) => first === second || (!!first && !!second && isCanvasOwner(first, second)) }, reader => {
 				const session = this._sessionState.read(reader).read(reader);
@@ -828,7 +829,7 @@ class AgentHostChatSession extends Disposable implements IChatSession {
 			});
 			this.canvasContext = derived(this, reader => {
 				const reference = owner.read(reader);
-				return reference ? canvasProvider.createContext(reference, references) : undefined;
+				return reference ? canvasProvider.createContext(reference, references, presentationChat) : undefined;
 			});
 		}
 

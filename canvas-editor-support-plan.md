@@ -2,8 +2,8 @@
 
 ## Status
 
-The implementation is being rebased onto `origin/main` at
-`d7622a529314a4abcefd7ca9e3d7344bc9ccba9e`.
+The implementation has been rebased onto `origin/main` at
+`24a41178148`, including the Agents Window's Add Tab reopening support.
 
 The original investigation used `faf5ab10523709dc2fd6bc7d6d19888cdc48c764`.
 Upstream subsequently replaced the VS Code-specific canvas facade with
@@ -156,6 +156,12 @@ multiple presentations of an exact owner and supports independently visible owne
   must not reset a user dismissal.
 - Authoritative empty membership or explicit session deletion performs cleanup.
 
+The Agents Window retains upstream's dismissed-canvas entries in the right-pane
+Add Tab menu. The shared coordinator supplies observable reopen targets and a
+manual reopen operation; menu registration, labels, and window scoping remain
+Sessions-owned. A failed reveal becomes manually reopenable without repeatedly
+stealing focus.
+
 ### Placement
 
 Open through `IEditorService`.
@@ -180,7 +186,7 @@ canvas co-visible and use ordinary editor conventions. Preserve the pane's
 | New lifetime while the owner is hidden | Do not reveal or steal focus. |
 | Same resource, changed metadata/source | Update the input/current page without repeated auto-reveal. |
 | User closes the tab | Dismiss that lifetime locally; do not call SDK close or extension `onClose`. |
-| Agent opens a new lifetime | Permit a new reveal, even for the same instance ID. |
+| Agent opens a new lifetime or successfully requests an existing instance again | Permit a new reveal. The explicit request is client-only presentation state, not a protocol revision. |
 | Unknown membership | Retain input/dismissal bookkeeping; do not treat it as removal. |
 | Pending/unavailable source | Retain the resource and show the unavailable placeholder. |
 | Authoritative resource removal | Close the input and forget its dismissal/presentation state. |
@@ -192,6 +198,13 @@ canvas co-visible and use ordinary editor conventions. Preserve the pane's
 Source changes are fenced by source identity and load sequence, not removed
 provider revision numbers. Hidden panes must remain hidden after resize, zoom, or
 scheduled layout even when their old rectangle is still non-empty.
+
+Real SDK verification exposed an additional distinction: reopening an unchanged
+instance does not publish different AHP membership or canvas state. The provider
+bridge therefore derives explicit open-request identity and success from the
+owning chat's tool state. A later successful request permits revealing a dismissed
+instance, while source/metadata changes, failed requests, and completion of an
+already-dismissed in-flight request do not.
 
 The initial reveal retains existing options:
 `pinned: true`, `revealIfOpened: true`, `preserveFocus: false`.
@@ -239,6 +252,14 @@ After adaptation to the fetched main:
 - `npm run typecheck-client`: passed.
 - Uncached repository ESLint on the conflict-resolution/protocol surfaces: passed.
 - Focused canvas, provider, model, pane, and layout tests: 40 passed.
+- After the real-OSS fixes, the client build passed with zero errors and the
+  combined canvas, browser-lifecycle, protocol, provider, draft, and chat-model
+  regression run passed 167 tests. Uncached lint and the layer checker passed.
+- After incorporating the latest main's Add Tab reopening, type checking,
+  uncached canvas/Sessions lint, and the layer checker passed. The same combined
+  targeted runner, now including the upstream Add Tab regressions, passed 172
+  tests. The earlier real SDK screenshots remain evidence from before this final
+  menu-preserving rebase; native verification was not repeated for that rebase.
 
 Before completing the rebase verification, also run the import-layer checker,
 related chat/protocol regressions, and a fresh full Code OSS build after restoring
@@ -249,7 +270,7 @@ The earlier
 passed four steps on macOS arm64, Code OSS 1.141.0 Dev, **before the rebase**.
 It is historical UI evidence, not proof of the current protocol integration.
 
-Remaining real-OSS verification:
+The real-OSS verification used:
 
 1. Launch isolated, authenticated profiles with the actual Copilot SDK and a safe
    project canvas extension.
@@ -257,8 +278,34 @@ Remaining real-OSS verification:
    interact with its page, invoke an action, close/reopen, and switch owners.
 3. Repeat opening, interaction, dismissal/reopen, and active-owner gating in the
    Agents window.
-4. Record observable state and screenshots. Report sign-in/platform/tooling
-   blockers as unverified, never as passing tests.
+4. Record observable state and screenshots, reporting any blockers accurately.
+
+### Real OSS results
+
+Verified on macOS arm64 with the actual Copilot SDK in Code OSS 1.141.0 Dev:
+
+| Scenario | Editor | Agents |
+| --- | --- | --- |
+| SDK capability discovery and native canvas open | Passed | Passed |
+| Native page counter interaction and SDK action | Passed | Passed |
+| Page-originated request reaches its owning assistant | Passed (`CANVAS_OWNER_CONFIRMED 1`) | Passed (`CANVAS_OWNER_CONFIRMED 2`) |
+| Tab close leaves the SDK instance alive | Passed | Passed |
+| Same-instance SDK reopen preserves domain state | Passed after the explicit-request fix | Passed |
+| Switching the owning conversation detaches native content | Passed | Passed |
+
+Evidence:
+[Editor reopen](./.build/vscode-playwright-mcp/canvas-oss-editor-reopened-passed.png),
+[Editor owner switch](./.build/vscode-playwright-mcp/canvas-oss-editor-owner-switch.png),
+[Agents reopen](./.build/vscode-playwright-mcp/canvas-oss-agents-reopened-passed.png),
+and [Agents owner switch](./.build/vscode-playwright-mcp/canvas-oss-agents-owner-switch.png).
+
+The first Editor reopen failed on the rebased implementation because identical
+SDK opens do not change a canvas lifetime. That failure was reproduced before
+the client-only fix. Verification also encountered expired SDK credentials after
+a window reload; the user refreshed normal sign-in before the passing rerun.
+Initial native screenshot capture warnings were observed in the Editor. A
+browser-model event-lifetime disposable warning on canvas close was investigated
+and fixed while preserving deferred close-event delivery.
 
 Windows/Linux native behavior and manual assistive-technology checks remain
 separate follow-up validation.
