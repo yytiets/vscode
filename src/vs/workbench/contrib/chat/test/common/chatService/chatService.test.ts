@@ -76,6 +76,7 @@ import { MockChatSessionsService } from '../mockChatSessionsService.js';
 import { AGENT_DEBUG_LOG_FILE_LOGGING_ENABLED_SETTING, COPILOT_SKILL_URI_SCHEME, TROUBLESHOOT_SKILL_PATH } from '../../../common/promptSyntax/promptTypes.js';
 import { ChatRequestSlashPromptPart } from '../../../common/requestParser/chatParserTypes.js';
 import { NullLanguageModelsService } from '../languageModels.js';
+import { ICanvasContext } from '../../../../canvases/common/canvas.js';
 
 const chatAgentWithUsedContextId = 'ChatProviderWithUsedContext';
 const chatAgentWithUsedContext: IChatAgent = {
@@ -3362,6 +3363,7 @@ suite('ChatService', () => {
 			readonly isCompleteObs?: ISettableObservable<boolean>;
 			readonly isReadOnly?: ISettableObservable<boolean>;
 			readonly isInputBlocked?: ISettableObservable<boolean>;
+			readonly canvasContext?: ISettableObservable<ICanvasContext | undefined>;
 			readonly interruptActiveResponseCallback?: () => Promise<boolean>;
 			readonly onDidStartServerRequest?: Event<IChatSessionServerRequest>;
 			readonly onDidChangeHistory?: Event<readonly IChatSessionHistoryItem[]>;
@@ -3385,6 +3387,7 @@ suite('ChatService', () => {
 				isCompleteObs: opts.isCompleteObs,
 				isReadOnly: opts.isReadOnly,
 				isInputBlocked: opts.isInputBlocked,
+				canvasContext: opts.canvasContext,
 				interruptActiveResponseCallback: opts.interruptActiveResponseCallback,
 				onDidStartServerRequest: opts.onDidStartServerRequest,
 				onDidChangeHistory: opts.onDidChangeHistory,
@@ -3885,6 +3888,32 @@ suite('ChatService', () => {
 				states: [true, false],
 				sendResult: { kind: 'rejected', reason: 'Session is read-only' },
 			});
+		});
+
+		test('forwards live canvas context without serializing presentation or transient sources', async () => {
+			const canvasContext = observableValue<ICanvasContext | undefined>('canvasContext', undefined);
+			const { resource } = setupRemoteProvider({ canvasContext });
+			const service = createChatService();
+			const ref = await service.acquireOrLoadSession(resource, ChatAgentLocation.Chat, CancellationToken.None);
+			assert.ok(ref);
+			testDisposables.add(ref);
+			const before = ref.object.canvasContext?.get();
+			const context: ICanvasContext = {
+				owner: { providerId: 'test', session: resource, chat: URI.parse('chat:/peer') },
+				canvases: constObservable([{
+					resource: URI.parse('canvas:/secret-presentation'),
+					instanceId: 'preview',
+					title: 'Preview',
+					source: URI.parse('https://secret.test/?token=private'),
+				}]),
+			};
+			canvasContext.set(context, undefined);
+			const serialized = JSON.stringify(ref.object);
+			assert.deepStrictEqual({
+				before,
+				live: ref.object.canvasContext?.get() === context,
+				serializedContext: serialized.includes('canvasContext') || serialized.includes('secret-presentation') || serialized.includes('secret.test'),
+			}, { before: undefined, live: true, serializedContext: false });
 		});
 
 		test('blocked input rejects send, queue and resend without modifying the transcript', async () => {

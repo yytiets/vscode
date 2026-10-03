@@ -25,9 +25,14 @@ import { Menus } from '../../../../browser/menus.js';
 import { ISessionsService } from '../../../../services/sessions/browser/sessionsService.js';
 import { IChat, ISessionCanvas, ISessionCapabilities } from '../../../../services/sessions/common/session.js';
 import { IActiveSession, ISessionsChangeEvent, ISessionsManagementService } from '../../../../services/sessions/common/sessionsManagement.js';
-import { SessionCanvasInput } from '../../common/sessionCanvas.js';
 import { registerSessionCanvasAddTabActions, REOPEN_SESSION_CANVAS_COMMAND_ID } from '../../electron-browser/sessionCanvasActions.js';
-import { SessionCanvasService } from '../../electron-browser/sessionCanvasService.js';
+import { CanvasInput } from '../../../../../workbench/contrib/canvases/common/canvas.js';
+import { CanvasService } from '../../../../../workbench/contrib/canvases/electron-browser/canvasService.js';
+import { ITextDiffEditorPane } from '../../../../../workbench/common/editor.js';
+import { IEditorGroup, IEditorGroupsService, IEditorPart } from '../../../../../workbench/services/editor/common/editorGroupsService.js';
+import { TestInstantiationService } from '../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
+import { TestNotificationService } from '../../../../../platform/notification/test/common/testNotificationService.js';
+import { SessionCanvasContextService } from '../../electron-browser/sessionCanvasService.js';
 
 suite('SessionCanvasService', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
@@ -55,14 +60,17 @@ suite('SessionCanvasService', () => {
 		const sessionsService = upcastPartial<ISessionsService>({ activeSession });
 		const sessionChanges = store.add(new Emitter<ISessionsChangeEvent>());
 		const sessionsManagementService = upcastPartial<ISessionsManagementService>({ onDidChangeSessions: sessionChanges.event });
-		const opened: SessionCanvasInput[] = [];
+		const opened: CanvasInput[] = [];
 		const openOptions: unknown[] = [];
 		const openSettled: Promise<void>[] = [];
-		let openEditorHandler = () => Promise.resolve<undefined>(undefined);
+		const group = upcastPartial<IEditorGroup>({ id: 1, windowId: 1 });
+		const groupsService = upcastPartial<IEditorGroupsService>({ mainPart: upcastPartial<IEditorPart>({ activeGroup: group, windowId: 1 }) });
+		const successfulOpen = () => Promise.resolve(upcastPartial<ITextDiffEditorPane>({ group }));
+		let openEditorHandler: () => Promise<ITextDiffEditorPane | undefined> = successfulOpen;
 		let closeCount = 0;
 		const editorService = new class extends mock<IEditorService>() {
-			override openEditor(...args: unknown[]): Promise<undefined> {
-				opened.push(args[0] as SessionCanvasInput);
+			override openEditor(...args: unknown[]): Promise<ITextDiffEditorPane | undefined> {
+				opened.push(args[0] as CanvasInput);
 				openOptions.push(args[1]);
 				const result = openEditorHandler();
 				openSettled.push(result.then(() => undefined, () => undefined));
@@ -80,13 +88,21 @@ suite('SessionCanvasService', () => {
 			onDidChangeSentiment: Event.None,
 		});
 		const configurationService = new TestConfigurationService({ [CanvasesEnabledSettingId]: canvasesEnabled });
-		const canvasService = store.add(new SessionCanvasService(
+		const contextService = store.add(new SessionCanvasContextService(
 			sessionsService,
 			sessionsManagementService,
+			groupsService,
+		));
+		const instantiationService = store.add(new TestInstantiationService());
+		instantiationService.stub(IEditorGroupsService, groupsService);
+		const canvasService = store.add(new CanvasService(
+			contextService,
 			editorService,
+			instantiationService,
 			entitlementService,
 			configurationService,
 			new NullLogService(),
+			new TestNotificationService(),
 		));
 		const setCanvasesEnabled = async (enabled: boolean) => {
 			await configurationService.setUserConfiguration(CanvasesEnabledSettingId, enabled);
@@ -94,7 +110,7 @@ suite('SessionCanvasService', () => {
 				affectsConfiguration: key => key === CanvasesEnabledSettingId,
 			}));
 		};
-		const setOpenEditorHandler = (handler: () => Promise<undefined>) => openEditorHandler = handler;
+		const setOpenEditorHandler = (handler?: () => Promise<ITextDiffEditorPane | undefined>) => openEditorHandler = handler ?? successfulOpen;
 		return { activeChat, activeSession, canvas, canvasService, canvases, chat, opened, openOptions, openSettled, session, sessionChanges, get closeCount() { return closeCount; }, setCanvasesEnabled, setOpenEditorHandler };
 	}
 
@@ -185,7 +201,7 @@ suite('SessionCanvasService', () => {
 		canvases.set([], undefined);
 		await failedOpen.error(new Error('open failed'));
 		await reopenRejected;
-		setOpenEditorHandler(() => Promise.resolve(undefined));
+		setOpenEditorHandler();
 		canvases.set([canvas], undefined);
 
 		assert.deepStrictEqual({
@@ -325,5 +341,14 @@ suite('SessionCanvasService', () => {
 		canvases.set([{ ...canvas, instanceId: undefined, source: undefined }], undefined);
 		canvases.set([canvas], undefined);
 		assert.strictEqual(opened.length, 1);
+	});
+
+	test('restricts presentation to the active conversation without closing inactive inputs', () => {
+		const { activeSession, session, opened, canvasService } = createHarness();
+		const input = opened[0];
+		activeSession.set(undefined, undefined);
+		const hidden = canvasService.isOwnerPresentable(input.reference);
+		activeSession.set(session, undefined);
+		assert.deepStrictEqual({ hidden, restored: canvasService.isOwnerPresentable(input.reference), disposed: input.isDisposed() }, { hidden: false, restored: true, disposed: false });
 	});
 });

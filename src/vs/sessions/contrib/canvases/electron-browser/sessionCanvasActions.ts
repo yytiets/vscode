@@ -13,7 +13,7 @@ import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextke
 import { IsAuxiliaryWindowContext, IsSessionsWindowContext, IsTopRightEditorGroupContext } from '../../../../workbench/common/contextkeys.js';
 import { ChatContextKeys } from '../../../../workbench/contrib/chat/common/actions/chatContextKeys.js';
 import { Menus } from '../../../browser/menus.js';
-import { getSessionCanvasReferenceKey, ISessionCanvasReference, ISessionCanvasReopenTarget, ISessionCanvasService } from '../common/sessionCanvas.js';
+import { getCanvasReferenceKey, ICanvasReference, ICanvasReopenTarget, ICanvasService } from '../../../../workbench/contrib/canvases/common/canvas.js';
 
 export const REOPEN_SESSION_CANVAS_COMMAND_ID = 'workbench.action.agentSessions.reopenCanvas';
 
@@ -32,8 +32,8 @@ class CanvasAddTabActionRegistration extends Disposable {
 
 	constructor(
 		readonly commandId: string,
-		reference: ISessionCanvasReference,
-		canvasService: ISessionCanvasService,
+		reference: ICanvasReference,
+		canvasService: ICanvasService,
 	) {
 		super();
 		this._register(CommandsRegistry.registerCommand(commandId, () => canvasService.reopenCanvas(reference)));
@@ -58,7 +58,7 @@ class CanvasAddTabActionRegistration extends Disposable {
 	}
 }
 
-export function registerSessionCanvasAddTabActions(canvasService: ISessionCanvasService): IDisposable {
+export function registerSessionCanvasAddTabActions(canvasService: ICanvasService): IDisposable {
 	const store = new DisposableStore();
 	const registrations = store.add(new DisposableMap<string, CanvasAddTabActionRegistration>());
 	let commandSequence = 0;
@@ -68,7 +68,7 @@ export function registerSessionCanvasAddTabActions(canvasService: ISessionCanvas
 		const activeKeys = new Set<string>();
 		for (let index = 0; index < targets.length; index++) {
 			const target = targets[index];
-			const key = getSessionCanvasReferenceKey(target.reference);
+			const key = getCanvasReferenceKey(target.reference);
 			activeKeys.add(key);
 			let registration = registrations.get(key);
 			if (!registration) {
@@ -90,7 +90,7 @@ export function registerSessionCanvasAddTabActions(canvasService: ISessionCanvas
 	return store;
 }
 
-function getCanvasInstanceLabels(targets: readonly ISessionCanvasReopenTarget[]): string[] {
+function getCanvasInstanceLabels(targets: readonly ICanvasReopenTarget[]): string[] {
 	const titleCounts = new Map<string, number>();
 	const instanceIdCounts = new Map<string, number>();
 	for (const { canvas } of targets) {

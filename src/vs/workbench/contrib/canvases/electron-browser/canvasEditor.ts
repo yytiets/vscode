@@ -23,19 +23,19 @@ import { ILogService } from '../../../../platform/log/common/log.js';
 import { IStorageService } from '../../../../platform/storage/common/storage.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
-import { EditorPane } from '../../../../workbench/browser/parts/editor/editorPane.js';
-import { IEditorOpenContext } from '../../../../workbench/common/editor.js';
-import { AccessibilityVerbositySettingId } from '../../../../workbench/contrib/accessibility/browser/accessibilityConfiguration.js';
-import { IBrowserViewModel, IBrowserViewWorkbenchService } from '../../../../workbench/contrib/browserView/common/browserView.js';
-import { focusWebContentsViewContainer, WebContentsViewHost } from '../../../../workbench/contrib/browserView/electron-browser/webContentsViewHost.js';
-import { IEditorGroup } from '../../../../workbench/services/editor/common/editorGroupsService.js';
-import { ISessionCanvasService, SessionCanvasInput } from '../common/sessionCanvas.js';
+import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
+import { IEditorOpenContext } from '../../../common/editor.js';
+import { AccessibilityVerbositySettingId } from '../../accessibility/browser/accessibilityConfiguration.js';
+import { IBrowserViewModel, IBrowserViewWorkbenchService } from '../../browserView/common/browserView.js';
+import { focusWebContentsViewContainer, WebContentsViewHost } from '../../browserView/electron-browser/webContentsViewHost.js';
+import { IEditorGroup, IEditorGroupsService } from '../../../services/editor/common/editorGroupsService.js';
+import { CanvasInput, ICanvasService } from '../common/canvas.js';
 
 export const SessionCanvasFocusedContext = new RawContextKey<boolean>('sessionCanvasFocused', false);
 
-export class SessionCanvasEditor extends EditorPane {
+export class CanvasEditor extends EditorPane {
 
-	static readonly ID = SessionCanvasInput.EDITOR_ID;
+	static readonly ID = CanvasInput.EDITOR_ID;
 
 	private wrapper!: HTMLElement;
 	private container!: HTMLElement;
@@ -45,7 +45,8 @@ export class SessionCanvasEditor extends EditorPane {
 	private readonly modelLifetime = this._register(new DisposableStore());
 	private readonly browserModel = this._register(new MutableDisposable<IBrowserViewModel>());
 	private readonly pendingVisibleLayout = this._register(new MutableDisposable());
-	private readonly currentInput = observableValue<SessionCanvasInput | undefined>(this, undefined);
+	private readonly currentInput = observableValue<CanvasInput | undefined>(this, undefined);
+	private readonly editorVisible = observableValue(this, false);
 	private readonly presentationVisible = observableValue(this, false);
 	private readonly semanticChanged = this._register(new Emitter<void>());
 	private loadSequence = 0;
@@ -62,13 +63,14 @@ export class SessionCanvasEditor extends EditorPane {
 		@IStorageService storageService: IStorageService,
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 		@IContextKeyService private readonly contextKeyService: IContextKeyService,
-		@ISessionCanvasService private readonly canvasService: ISessionCanvasService,
+		@ICanvasService private readonly canvasService: ICanvasService,
+		@IEditorGroupsService private readonly editorGroupsService: IEditorGroupsService,
 		@IBrowserViewWorkbenchService private readonly browserViewService: IBrowserViewWorkbenchService,
 		@IAccessibilityService private readonly accessibilityService: IAccessibilityService,
 		@IAccessibleViewService private readonly accessibleViewService: IAccessibleViewService,
 		@ILogService private readonly logService: ILogService,
 	) {
-		super(SessionCanvasEditor.ID, group, telemetryService, themeService, storageService);
+		super(CanvasEditor.ID, group, telemetryService, themeService, storageService);
 	}
 
 	protected override createEditor(parent: HTMLElement): void {
@@ -101,7 +103,7 @@ export class SessionCanvasEditor extends EditorPane {
 		}));
 		this._register(autorun(reader => {
 			const input = this.currentInput.read(reader);
-			if (!input || !this.canvasService.enabled.read(reader) || !this.canvasService.isActiveOwner(input.reference, reader)) {
+			if (!input || !this.canvasService.enabled.read(reader) || !this.canvasService.isOwnerPresentable(input.reference, reader)) {
 				this._detach(localize('canvas.ownerUnavailable', "This canvas is only shown beside its owning conversation."));
 				return;
 			}
@@ -121,7 +123,10 @@ export class SessionCanvasEditor extends EditorPane {
 		}));
 	}
 
-	override async setInput(input: SessionCanvasInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
+	override async setInput(input: CanvasInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
+		if (this.group.windowId !== this.editorGroupsService.mainPart.windowId) {
+			throw new Error(localize('canvas.mainWindowOnly', "Canvases can only be shown in the main window beside their owning conversation."));
+		}
 		this.currentInput.set(undefined, undefined);
 		await super.setInput(input, options, context, token);
 		if (!token.isCancellationRequested && this.input === input) {
@@ -129,7 +134,7 @@ export class SessionCanvasEditor extends EditorPane {
 		}
 	}
 
-	private async _load(input: SessionCanvasInput, key: string): Promise<void> {
+	private async _load(input: CanvasInput, key: string): Promise<void> {
 		const canvas = input.canvas.get();
 		if (canvas === undefined || canvas.source === undefined) {
 			return;
@@ -152,7 +157,7 @@ export class SessionCanvasEditor extends EditorPane {
 		} catch {
 			if (this._isCurrent(input, canvas.source, sequence)) {
 				this._detach(localize('canvas.loadFailed', "The canvas could not be loaded."));
-				this.logService.error('[SessionCanvasEditor] Failed to load canvas');
+				this.logService.error('[CanvasEditor] Failed to load canvas');
 			}
 		} finally {
 			if (sequence === this.loadSequence && this.loadingKey === key) {
@@ -161,12 +166,12 @@ export class SessionCanvasEditor extends EditorPane {
 		}
 	}
 
-	private _isCurrent(input: SessionCanvasInput, source: URI, sequence: number): boolean {
+	private _isCurrent(input: CanvasInput, source: URI, sequence: number): boolean {
 		return !this._store.isDisposed
 			&& sequence === this.loadSequence
 			&& this.currentInput.get() === input
 			&& isEqual(input.canvas.get()?.source, source)
-			&& this.canvasService.isActiveOwner(input.reference);
+			&& this.canvasService.isOwnerPresentable(input.reference);
 	}
 
 	private _setModel(model: IBrowserViewModel | undefined): void {
@@ -210,13 +215,11 @@ export class SessionCanvasEditor extends EditorPane {
 			this.host.setModel(undefined);
 			const input = this.currentInput.get();
 			const canvas = input?.canvas.get();
-			if (input && canvas?.source && this.canvasService.isActiveOwner(input.reference)) {
+			if (input && canvas?.source && this.canvasService.isOwnerPresentable(input.reference)) {
 				void this._load(input, `${canvas.resource.toString()}\u0000${canvas.source.toString()}`);
 			}
 		}));
-		const visible = this.presentationVisible.get() || this.group.activeEditor === this.input;
-		this.presentationVisible.set(visible, undefined);
-		this.host.setVisible(visible);
+		this.host.setVisible(this.editorVisible.get());
 		this.layout();
 	}
 
@@ -242,7 +245,8 @@ export class SessionCanvasEditor extends EditorPane {
 		const y = snap(rect.top);
 		const width = snap(rect.width);
 		const height = snap(rect.height);
-		const visible = width > 0
+		const visible = this.editorVisible.get()
+			&& width > 0
 			&& height > 0
 			&& rect.right > 0
 			&& rect.bottom > 0
@@ -255,17 +259,20 @@ export class SessionCanvasEditor extends EditorPane {
 		this.container.style.width = `${width}px`;
 		this.container.style.height = `${height}px`;
 		void this.model.layout({ x, y, width, height, windowId: this.group.windowId, zoomFactor, cornerRadius: 0 })
-			.catch(error => this.logService.error('[SessionCanvasEditor] Failed to layout canvas', error));
+			.catch(error => this.logService.error('[CanvasEditor] Failed to layout canvas', error));
 		this.host.layout();
 	}
 
 	protected override setEditorVisible(visible: boolean): void {
-		this.presentationVisible.set(visible, undefined);
+		this.editorVisible.set(visible, undefined);
+		if (!visible) {
+			this.presentationVisible.set(false, undefined);
+		}
 		this.host?.setVisible(visible);
 		this.pendingVisibleLayout.clear();
 		if (visible) {
 			this.pendingVisibleLayout.value = scheduleAtNextAnimationFrame(this.window, () => {
-				if (this.presentationVisible.get()) {
+				if (this.editorVisible.get()) {
 					this.layout();
 				}
 			});
@@ -293,9 +300,9 @@ export class SessionCanvasEditor extends EditorPane {
 	createAccessibleProvider(type: AccessibleViewType): AccessibleContentProvider {
 		const input = this.input;
 		const help = [
-			localize('canvas.help.overview', "This canvas is a private page owned by the active conversation."),
+			localize('canvas.help.overview', "This canvas is a private page owned by its conversation. Its content is available while that conversation is shown."),
 			localize('canvas.help.navigation', "Tab moves through page controls. Use <keybinding:workbench.action.focusNextPart> to leave the page."),
-			localize('canvas.help.close', "Closing the tab hides this canvas. Use the Add Tab menu in the editor toolbar and choose its title to reopen it while it remains available."),
+			localize('canvas.help.close', "Closing the tab hides this canvas. Ask the agent to reopen it, or choose its title from Add Tab in the Agents Window while it remains available."),
 		].join('\n\n');
 		this.semanticText = localize('canvas.reading', "Reading accessible canvas content…");
 		return new AccessibleContentProvider(
@@ -303,7 +310,7 @@ export class SessionCanvasEditor extends EditorPane {
 			{ type, language: 'plaintext' },
 			() => type === AccessibleViewType.Help ? help : this.semanticText,
 			() => {
-				if (input instanceof SessionCanvasInput && this.input === input && this.presentationVisible.get() && this.canvasService.isActiveOwner(input.reference)) {
+				if (input instanceof CanvasInput && this.input === input && this.presentationVisible.get() && this.canvasService.isOwnerPresentable(input.reference)) {
 					this.focus();
 				}
 			},
@@ -342,7 +349,7 @@ export class SessionCanvasEditor extends EditorPane {
 					return;
 				}
 				this.semanticText = localize('canvas.semanticError', "The canvas accessible content could not be read.");
-				this.logService.error('[SessionCanvasEditor] Failed to read accessible canvas content', error);
+				this.logService.error('[CanvasEditor] Failed to read accessible canvas content', error);
 			}
 		}
 		this.semanticChanged.fire();
