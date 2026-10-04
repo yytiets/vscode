@@ -1,15 +1,10 @@
 # Canvas Support in the Agents and Editor Windows
 
-## Status
+## Overview
 
-The implementation has been rebased onto `origin/main` at
-`24a41178148`, including the Agents Window's Add Tab reopening support.
-
-The original investigation used `faf5ab10523709dc2fd6bc7d6d19888cdc48c764`.
-Upstream subsequently replaced the VS Code-specific canvas facade with
-experimental AHP canvas channels in #337780. This document now describes that
-channel-based implementation, rather than proposing restoration of the removed
-facade.
+This plan describes shared canvas presentation for the Agents and Editor windows
+using experimental AHP canvas channels. Window-specific adapters provide ownership
+and placement while the workbench owns the common editor and presentation lifecycle.
 
 ## Agreed scope
 
@@ -43,7 +38,7 @@ See [chat state](./src/vs/platform/agentHost/common/state/protocol/channels-chat
 [canvas state](./src/vs/platform/agentHost/common/state/protocol/channels-canvas/state.ts),
 and [subscription handling](./src/vs/platform/agentHost/common/state/agentSubscription.ts).
 
-Important differences from the original investigation:
+Protocol invariants:
 
 1. There is no `IAgentConnection.canvases` facade or separate source-resolution RPC.
 2. Membership comes from the owning chat; canvas state is independently subscribable.
@@ -199,8 +194,8 @@ Source changes are fenced by source identity and load sequence, not removed
 provider revision numbers. Hidden panes must remain hidden after resize, zoom, or
 scheduled layout even when their old rectangle is still non-empty.
 
-Real SDK verification exposed an additional distinction: reopening an unchanged
-instance does not publish different AHP membership or canvas state. The provider
+Reopening an unchanged instance does not publish different AHP membership or canvas
+state. The provider
 bridge therefore derives explicit open-request identity and success from the
 owning chat's tool state. A later successful request permits revealing a dismissed
 instance, while source/metadata changes, failed requests, and completion of an
@@ -247,65 +242,42 @@ The focused suites cover:
 - native visibility and auxiliary-window rejection;
 - unchanged Agents Details presentation and setting/AI gates.
 
-After adaptation to the fetched main:
+### Local checks
 
-- `npm run typecheck-client`: passed.
-- Uncached repository ESLint on the conflict-resolution/protocol surfaces: passed.
-- Focused canvas, provider, model, pane, and layout tests: 40 passed.
-- After the real-OSS fixes, the client build passed with zero errors and the
-  combined canvas, browser-lifecycle, protocol, provider, draft, and chat-model
-  regression run passed 167 tests. Uncached lint and the layer checker passed.
-- After incorporating the latest main's Add Tab reopening, type checking,
-  uncached canvas/Sessions lint, and the layer checker passed. The same combined
-  targeted runner, now including the upstream Add Tab regressions, passed 172
-  tests. The earlier real SDK screenshots remain evidence from before this final
-  menu-preserving rebase; native verification was not repeated for that rebase.
+Use existing build/watch diagnostics when available. For contract and ownership
+changes, run:
 
-Before completing the rebase verification, also run the import-layer checker,
-related chat/protocol regressions, and a fresh full Code OSS build after restoring
-changed dependencies as necessary.
+```bash
+npm run typecheck-client
+npm run valid-layers-check
+node node_modules/eslint/bin/eslint.js --no-cache --max-warnings 0 src/vs/workbench/contrib/canvases src/vs/sessions/contrib/canvases
+```
 
-The earlier
-[synthetic native Editor report](./.build/vscode-playwright-mcp/evidence/canvas-editor-native-2026-10-03T19-46-44-708Z/report.html)
-passed four steps on macOS arm64, Code OSS 1.141.0 Dev, **before the rebase**.
-It is historical UI evidence, not proof of the current protocol integration.
+Unit tests use compiled output. When it is stale, refresh it with
+`npm run transpile-client`, then run the focused suites together:
 
-The real-OSS verification used:
+```bash
+./scripts/test.sh \
+  --runGlob '{**/{workbench,sessions}/contrib/canvases/test/**/*.test.js,**/browserView/test/electron-browser/browserViewWorkbenchService.test.js,**/chat/test/common/chatService/chatService.test.js,**/chat/test/browser/agentSessions/agentHostChatContribution.test.js,**/sessions/contrib/providers/agentHost/test/browser/localAgentHostSessionsProvider.test.js,**/sessions/contrib/layout/test/browser/desktopStrategies.test.js}' \
+  --grep '[Cc]anvas|BrowserViewWorkbenchService'
+```
+
+### Native Code OSS checks
 
 1. Launch isolated, authenticated profiles with the actual Copilot SDK and a safe
    project canvas extension.
 2. In the Editor window, use the runtime tools to discover/open the canvas,
-   interact with its page, invoke an action, close/reopen, and switch owners.
-3. Repeat opening, interaction, dismissal/reopen, and active-owner gating in the
-   Agents window.
-4. Record observable state and screenshots, reporting any blockers accurately.
+   interact with its page, and invoke a canvas action. A page-originated request
+   must reach the exact owning assistant.
+3. Close the canvas tab and confirm its SDK instance remains alive. Ask the agent
+   to reopen the same instance and confirm domain state is preserved.
+4. Show multiple owning chats in the Editor window. Canvas placement must preserve
+   those conversations, and hiding one owner must detach only its native content.
+5. Repeat opening, interaction, dismissal/reopen, and active-owner gating in the
+   Agents window. Also reopen a dismissed live canvas from Add Tab.
+6. Verify keyboard exit, Accessibility Help, Accessible View, focus restoration,
+   and setting/AI disablement. Check native behavior on macOS, Windows, and Linux
+   and with the relevant assistive technologies.
 
-### Real OSS results
-
-Verified on macOS arm64 with the actual Copilot SDK in Code OSS 1.141.0 Dev:
-
-| Scenario | Editor | Agents |
-| --- | --- | --- |
-| SDK capability discovery and native canvas open | Passed | Passed |
-| Native page counter interaction and SDK action | Passed | Passed |
-| Page-originated request reaches its owning assistant | Passed (`CANVAS_OWNER_CONFIRMED 1`) | Passed (`CANVAS_OWNER_CONFIRMED 2`) |
-| Tab close leaves the SDK instance alive | Passed | Passed |
-| Same-instance SDK reopen preserves domain state | Passed after the explicit-request fix | Passed |
-| Switching the owning conversation detaches native content | Passed | Passed |
-
-Evidence:
-[Editor reopen](./.build/vscode-playwright-mcp/canvas-oss-editor-reopened-passed.png),
-[Editor owner switch](./.build/vscode-playwright-mcp/canvas-oss-editor-owner-switch.png),
-[Agents reopen](./.build/vscode-playwright-mcp/canvas-oss-agents-reopened-passed.png),
-and [Agents owner switch](./.build/vscode-playwright-mcp/canvas-oss-agents-owner-switch.png).
-
-The first Editor reopen failed on the rebased implementation because identical
-SDK opens do not change a canvas lifetime. That failure was reproduced before
-the client-only fix. Verification also encountered expired SDK credentials after
-a window reload; the user refreshed normal sign-in before the passing rerun.
-Initial native screenshot capture warnings were observed in the Editor. A
-browser-model event-lifetime disposable warning on canvas close was investigated
-and fixed while preserving deferred close-event delivery.
-
-Windows/Linux native behavior and manual assistive-technology checks remain
-separate follow-up validation.
+Keep run-specific results in the pull request or issue. Evidence links belong
+there only when the artifacts are published at durable, reader-accessible URLs.
